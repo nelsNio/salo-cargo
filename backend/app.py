@@ -364,6 +364,22 @@ def create_trip(item: TripIn):
     return item
 
 
+@app.put("/api/trips/{trip_id}")
+def update_trip(trip_id: str, item: TripIn):
+    if item.id != trip_id:
+        raise HTTPException(422, "El id de la ruta no coincide con el id del viaje")
+    with db() as conn:
+        cur = conn.execute(
+            """UPDATE trips SET trip_date=?, origin=?, destination=?, client=?, driver_id=?,
+               vehicle_id=?, freight=?, trip_expenses=?, notes=? WHERE id=?""",
+            (item.trip_date.isoformat(), item.origin, item.destination, item.client,
+             item.driver_id, item.vehicle_id, item.freight, item.trip_expenses, item.notes, trip_id),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(404, "El viaje no existe")
+    return item
+
+
 @app.get("/api/payments")
 def payments():
     with db() as conn:
@@ -384,6 +400,24 @@ def create_payment(item: PaymentIn):
         return {"id": cur.lastrowid, **item.model_dump(mode="json")}
 
 
+@app.put("/api/payments/{payment_id}")
+def update_payment(payment_id: int, item: PaymentIn):
+    if item.payment_type not in ("Anticipo", "Saldo"):
+        raise HTTPException(422, "payment_type debe ser Anticipo o Saldo")
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM trips WHERE id=?", (item.trip_id,)).fetchone():
+            raise HTTPException(404, "El viaje no existe")
+        cur = conn.execute(
+            """UPDATE payments SET payment_date=?, trip_id=?, payment_type=?, amount=?, account=?, notes=?
+               WHERE id=?""",
+            (item.payment_date.isoformat(), item.trip_id, item.payment_type, item.amount,
+             item.account, item.notes, payment_id),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(404, "El pago no existe")
+    return {"id": payment_id, **item.model_dump(mode="json")}
+
+
 @app.get("/api/expenses")
 def expenses():
     with db() as conn:
@@ -400,6 +434,20 @@ def create_expense(item: ExpenseIn):
              item.amount, item.paid_by, item.status, item.notes),
         )
         return {"id": cur.lastrowid, **item.model_dump(mode="json")}
+
+
+@app.put("/api/expenses/{expense_id}")
+def update_expense(expense_id: int, item: ExpenseIn):
+    with db() as conn:
+        cur = conn.execute(
+            """UPDATE expenses SET expense_date=?, trip_id=?, category=?, description=?, amount=?,
+               paid_by=?, status=?, notes=? WHERE id=?""",
+            (item.expense_date.isoformat(), item.trip_id, item.category, item.description,
+             item.amount, item.paid_by, item.status, item.notes, expense_id),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(404, "El gasto no existe")
+    return {"id": expense_id, **item.model_dump(mode="json")}
 
 
 @app.get("/api/salaries/{year}")
