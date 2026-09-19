@@ -55,6 +55,8 @@ def sqlite_row(cursor, row):
 
 
 def postgres_row_factory(cursor):
+    if cursor.description is None:
+        return None
     columns = [column.name for column in cursor.description]
     return lambda row: CompatRow(dict(zip(columns, row)))
 
