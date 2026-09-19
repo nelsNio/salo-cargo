@@ -54,8 +54,9 @@ def sqlite_row(cursor, row):
     return CompatRow({cursor.description[i][0]: row[i] for i in range(len(row))})
 
 
-def postgres_row(cursor, row):
-    return CompatRow(dict_row(cursor, row))
+def postgres_row_factory(cursor):
+    columns = [column.name for column in cursor.description]
+    return lambda row: CompatRow(dict(zip(columns, row)))
 
 
 class DatabaseConnection:
@@ -86,7 +87,7 @@ def db():
     if DATABASE_URL:
         if psycopg is None:
             raise RuntimeError("DATABASE_URL está configurada pero falta instalar psycopg")
-        return DatabaseConnection(psycopg.connect(DATABASE_URL, row_factory=postgres_row), postgres=True)
+        return DatabaseConnection(psycopg.connect(DATABASE_URL, row_factory=postgres_row_factory), postgres=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite_row
     conn.execute("PRAGMA foreign_keys = ON")
