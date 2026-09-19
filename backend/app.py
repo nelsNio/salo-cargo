@@ -1,0 +1,389 @@
+from datetime import date
+from pathlib import Path
+import os
+import sqlite3
+import json
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
+DB_PATH = Path(os.getenv("DATABASE_PATH", str(BASE_DIR / "viajes.db"))).expanduser()
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+cors_value = os.getenv(
+    "CORS_ORIGINS",
+    "http://127.0.0.1:5500,http://localhost:5500",
+)
+CORS_ORIGINS = [origin.strip() for origin in cors_value.split(",") if origin.strip()]
+
+app = FastAPI(title="SaloCargo API", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA journal_mode = WAL")
+    return conn
+
+
+def init_db():
+    with db() as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS drivers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                active INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE IF NOT EXISTS vehicles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                plate TEXT UNIQUE,
+                active INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE IF NOT EXISTS trips (
+                id TEXT PRIMARY KEY,
+                trip_date TEXT NOT NULL,
+                origin TEXT NOT NULL,
+                destination TEXT NOT NULL,
+                client TEXT,
+                driver_id INTEGER REFERENCES drivers(id),
+                vehicle_id INTEGER REFERENCES vehicles(id),
+                freight REAL NOT NULL DEFAULT 0,
+                trip_expenses REAL NOT NULL DEFAULT 0,
+                notes TEXT
+            );
+            CREATE TABLE IF NOT EXISTS payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                payment_date TEXT NOT NULL,
+                trip_id TEXT NOT NULL REFERENCES trips(id),
+                payment_type TEXT NOT NULL CHECK(payment_type IN ('Anticipo','Saldo')),
+                amount REAL NOT NULL,
+                account TEXT,
+                notes TEXT
+            );
+            CREATE TABLE IF NOT EXISTS expenses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                expense_date TEXT NOT NULL,
+                trip_id TEXT REFERENCES trips(id),
+                category TEXT NOT NULL,
+                description TEXT NOT NULL,
+                amount REAL NOT NULL,
+                paid_by TEXT,
+                status TEXT NOT NULL DEFAULT 'Registrado',
+                notes TEXT
+            );
+            CREATE TABLE IF NOT EXISTS monthly_salaries (
+                year INTEGER NOT NULL,
+                month INTEGER NOT NULL,
+                amount REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY(year, month)
+            );
+            CREATE TABLE IF NOT EXISTS app_state (
+                id INTEGER PRIMARY KEY CHECK(id=1),
+                payload TEXT NOT NULL
+            );
+            """
+        )
+        migrate_state_to_tables(conn)
+
+
+def migrate_state_to_tables(conn):
+    """Migrate the transitional JSON snapshot into normalized tables once."""
+    if conn.execute("SELECT COUNT(*) FROM trips").fetchone()[0]:
+        return
+    row = conn.execute("SELECT payload FROM app_state WHERE id=1").fetchone()
+    if not row:
+        return
+    payload = json.loads(row[0])
+    driver_cache = {}
+    vehicle_cache = {}
+    for item in payload.get("drivers", []):
+        name = item.get("name") if isinstance(item, dict) else str(item)
+        if name:
+            cur = conn.execute("INSERT OR IGNORE INTO drivers(name) VALUES (?)", (name,))
+            existing = conn.execute("SELECT id FROM drivers WHERE name=?", (name,)).fetchone()
+            driver_cache[name] = existing[0] if existing else cur.lastrowid
+    for item in payload.get("vehicles", []):
+        if isinstance(item, dict):
+            name, plate = item.get("name", ""), item.get("plate")
+        else:
+            name, plate = str(item), None
+        if name:
+            conn.execute("INSERT OR IGNORE INTO vehicles(name,plate) VALUES (?,?)", (name, plate))
+            existing = conn.execute("SELECT id FROM vehicles WHERE name=?", (name,)).fetchone()
+            vehicle_cache[name] = existing[0] if existing else None
+    for t in payload.get("trips", []):
+        driver_id = driver_cache.get(t.get("driver"))
+        vehicle_id = vehicle_cache.get(t.get("vehicle"))
+        conn.execute(
+            """INSERT OR IGNORE INTO trips(id,trip_date,origin,destination,client,driver_id,vehicle_id,freight,trip_expenses,notes)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (t["id"], t.get("date", ""), t.get("origin", ""), t.get("destination", ""), t.get("client", ""),
+             driver_id, vehicle_id, t.get("freight", 0), t.get("tripExpenses", 0), t.get("notes", "")),
+        )
+    for p in payload.get("payments", []):
+        trip_id = p.get("tripId")
+        if trip_id and conn.execute("SELECT 1 FROM trips WHERE id=?", (trip_id,)).fetchone():
+            conn.execute(
+                "INSERT INTO payments(payment_date,trip_id,payment_type,amount,account,notes) VALUES (?,?,?,?,?,?)",
+                (p.get("date", ""), trip_id, p.get("type", "Saldo"), p.get("amount", 0), p.get("account", ""), p.get("notes", "")),
+            )
+    for e in payload.get("expenses", []):
+        trip_id = e.get("tripId") or None
+        if trip_id and not conn.execute("SELECT 1 FROM trips WHERE id=?", (trip_id,)).fetchone():
+            trip_id = None
+        conn.execute(
+            """INSERT INTO expenses(expense_date,trip_id,category,description,amount,paid_by,status,notes)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (e.get("date", ""), trip_id, e.get("category", "Por clasificar"), e.get("description", ""),
+             e.get("amount", 0), e.get("paidBy", ""), e.get("status", "Registrado"), e.get("notes", "")),
+        )
+    for month, amount in payload.get("salaries", {}).items():
+        conn.execute(
+            "INSERT OR REPLACE INTO monthly_salaries(year,month,amount) VALUES (?,?,?)",
+            (2026, int(month), amount),
+        )
+
+
+class DriverIn(BaseModel):
+    name: str = Field(min_length=1)
+
+
+class VehicleIn(BaseModel):
+    name: str = Field(min_length=1)
+    plate: str | None = None
+
+
+class TripIn(BaseModel):
+    id: str = Field(min_length=1)
+    trip_date: date
+    origin: str = Field(min_length=1)
+    destination: str = Field(min_length=1)
+    client: str = ""
+    driver_id: int | None = None
+    vehicle_id: int | None = None
+    freight: float = 0
+    trip_expenses: float = 0
+    notes: str = ""
+
+
+class PaymentIn(BaseModel):
+    payment_date: date
+    trip_id: str
+    payment_type: str
+    amount: float = Field(gt=0)
+    account: str = ""
+    notes: str = ""
+
+
+class ExpenseIn(BaseModel):
+    expense_date: date
+    trip_id: str | None = None
+    category: str
+    description: str
+    amount: float = Field(gt=0)
+    paid_by: str = ""
+    status: str = "Registrado"
+    notes: str = ""
+
+
+class SalaryIn(BaseModel):
+    amount: float = Field(ge=0)
+
+
+@app.on_event("startup")
+def startup():
+    init_db()
+
+
+@app.get("/api/health")
+def health():
+    with db() as conn:
+        conn.execute("SELECT 1").fetchone()
+    return {"ok": True, "service": "salo-cargo-api", "database": str(DB_PATH.name)}
+
+
+@app.get("/api/state")
+def get_state():
+    with db() as conn:
+        row = conn.execute("SELECT payload FROM app_state WHERE id=1").fetchone()
+    if not row:
+        raise HTTPException(404, "Todavía no hay información sincronizada")
+    return json.loads(row[0])
+
+
+@app.put("/api/state")
+def put_state(payload: dict):
+    serialized = json.dumps(payload, ensure_ascii=False)
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO app_state(id,payload) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",
+            (serialized,),
+        )
+        # The transitional frontend sends a complete snapshot. Keep the
+        # normalized tables synchronized until the UI calls each endpoint
+        # directly.
+        conn.execute("DELETE FROM monthly_salaries")
+        conn.execute("DELETE FROM expenses")
+        conn.execute("DELETE FROM payments")
+        conn.execute("DELETE FROM trips")
+        migrate_state_to_tables(conn)
+    return {"ok": True, "trips": len(payload.get("trips", [])), "payments": len(payload.get("payments", [])), "expenses": len(payload.get("expenses", []))}
+
+
+@app.get("/api/drivers")
+def drivers():
+    with db() as conn:
+        return [dict(r) for r in conn.execute("SELECT * FROM drivers WHERE active=1 ORDER BY name")]
+
+
+@app.post("/api/drivers", status_code=201)
+def create_driver(item: DriverIn):
+    try:
+        with db() as conn:
+            cur = conn.execute("INSERT INTO drivers(name) VALUES (?)", (item.name.strip(),))
+            return {"id": cur.lastrowid, "name": item.name.strip()}
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, "El conductor ya existe")
+
+
+@app.get("/api/vehicles")
+def vehicles():
+    with db() as conn:
+        return [dict(r) for r in conn.execute("SELECT * FROM vehicles WHERE active=1 ORDER BY name")]
+
+
+@app.post("/api/vehicles", status_code=201)
+def create_vehicle(item: VehicleIn):
+    with db() as conn:
+        cur = conn.execute("INSERT INTO vehicles(name, plate) VALUES (?, ?)", (item.name.strip(), item.plate))
+        return {"id": cur.lastrowid, "name": item.name.strip(), "plate": item.plate}
+
+
+@app.get("/api/trips")
+def trips():
+    with db() as conn:
+        rows = conn.execute(
+            """SELECT t.*, d.name driver_name, v.name vehicle_name, v.plate vehicle_plate
+               FROM trips t LEFT JOIN drivers d ON d.id=t.driver_id
+               LEFT JOIN vehicles v ON v.id=t.vehicle_id ORDER BY t.trip_date DESC, t.id DESC"""
+        )
+        return [dict(r) for r in rows]
+
+
+@app.post("/api/trips", status_code=201)
+def create_trip(item: TripIn):
+    with db() as conn:
+        try:
+            conn.execute(
+                """INSERT INTO trips(id, trip_date, origin, destination, client, driver_id, vehicle_id, freight, trip_expenses, notes)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (item.id, item.trip_date.isoformat(), item.origin, item.destination, item.client,
+                 item.driver_id, item.vehicle_id, item.freight, item.trip_expenses, item.notes),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(409, f"No se pudo crear el viaje: {exc}")
+    return item
+
+
+@app.get("/api/payments")
+def payments():
+    with db() as conn:
+        return [dict(r) for r in conn.execute("SELECT * FROM payments ORDER BY payment_date DESC, id DESC")]
+
+
+@app.post("/api/payments", status_code=201)
+def create_payment(item: PaymentIn):
+    if item.payment_type not in ("Anticipo", "Saldo"):
+        raise HTTPException(422, "payment_type debe ser Anticipo o Saldo")
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM trips WHERE id=?", (item.trip_id,)).fetchone():
+            raise HTTPException(404, "El viaje no existe")
+        cur = conn.execute(
+            "INSERT INTO payments(payment_date, trip_id, payment_type, amount, account, notes) VALUES (?, ?, ?, ?, ?, ?)",
+            (item.payment_date.isoformat(), item.trip_id, item.payment_type, item.amount, item.account, item.notes),
+        )
+        return {"id": cur.lastrowid, **item.model_dump(mode="json")}
+
+
+@app.get("/api/expenses")
+def expenses():
+    with db() as conn:
+        return [dict(r) for r in conn.execute("SELECT * FROM expenses ORDER BY expense_date DESC, id DESC")]
+
+
+@app.post("/api/expenses", status_code=201)
+def create_expense(item: ExpenseIn):
+    with db() as conn:
+        cur = conn.execute(
+            """INSERT INTO expenses(expense_date, trip_id, category, description, amount, paid_by, status, notes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (item.expense_date.isoformat(), item.trip_id, item.category, item.description,
+             item.amount, item.paid_by, item.status, item.notes),
+        )
+        return {"id": cur.lastrowid, **item.model_dump(mode="json")}
+
+
+@app.get("/api/salaries/{year}")
+def salaries(year: int):
+    with db() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT year, month, amount FROM monthly_salaries WHERE year=? ORDER BY month",
+            (year,),
+        )]
+
+
+@app.put("/api/salaries/{year}/{month}")
+def save_salary(year: int, month: int, item: SalaryIn):
+    if month < 1 or month > 12:
+        raise HTTPException(422, "El mes debe estar entre 1 y 12")
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO monthly_salaries(year,month,amount) VALUES(?,?,?) "
+            "ON CONFLICT(year,month) DO UPDATE SET amount=excluded.amount",
+            (year, month, item.amount),
+        )
+    return {"year": year, "month": month, "amount": item.amount}
+
+
+@app.get("/api/reports/{year}/{month}")
+def monthly_report(year: int, month: int):
+    if month < 1 or month > 12:
+        raise HTTPException(422, "El mes debe estar entre 1 y 12")
+    prefix = f"{year:04d}-{month:02d}"
+    with db() as conn:
+        trips = [dict(r) for r in conn.execute("SELECT * FROM trips WHERE substr(trip_date,1,7)=?", (prefix,))]
+        payments = [dict(r) for r in conn.execute("SELECT * FROM payments WHERE substr(payment_date,1,7)=?", (prefix,))]
+        expenses = [dict(r) for r in conn.execute("SELECT * FROM expenses WHERE substr(expense_date,1,7)=?", (prefix,))]
+        salary = conn.execute("SELECT amount FROM monthly_salaries WHERE year=? AND month=?", (year, month)).fetchone()
+    return {
+        "year": year,
+        "month": month,
+        "trips": [
+            {**t, "date": t.pop("trip_date"), "tripExpenses": t.pop("trip_expenses")}
+            for t in trips
+        ],
+        "payments": [
+            {**p, "date": p.pop("payment_date"), "tripId": p.pop("trip_id"), "type": p.pop("payment_type")}
+            for p in payments
+        ],
+        "expenses": [
+            {**e, "date": e.pop("expense_date"), "tripId": e.pop("trip_id"), "paidBy": e.pop("paid_by")}
+            for e in expenses
+        ],
+        "salary": salary[0] if salary else 0,
+    }

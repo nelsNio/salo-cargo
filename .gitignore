@@ -1,0 +1,19 @@
+# Entornos y cachés
+backend/.venv/
+**/__pycache__/
+*.py[cod]
+.DS_Store
+
+# Base local: usar un volumen o restauración en el entorno desplegado
+backend/*.db
+backend/*.db-shm
+backend/*.db-wal
+
+# Configuración local y secretos
+backend/.env
+frontend-config.local.js
+
+# Archivos temporales y respaldos locales
+*.log
+*.tmp
+respaldo_*.json
