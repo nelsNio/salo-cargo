@@ -326,7 +326,11 @@ def startup():
 def health():
     with db() as conn:
         conn.execute("SELECT 1").fetchone()
-    return {"ok": True, "service": "salo-cargo-api", "database": str(DB_PATH.name)}
+    return {
+        "ok": True,
+        "service": "salo-cargo-api",
+        "database": "postgresql" if DATABASE_URL else str(DB_PATH.name),
+    }
 
 
 @app.get("/", include_in_schema=False)
