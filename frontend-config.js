@@ -1,3 +1,2 @@
-// Define aquí la URL pública del backend cuando frontend y backend estén
-// desplegados en dominios diferentes. Vacío = mismo origen o configuración local.
-window.__API_BASE__ = '';
+// Backend público de SaloCargo en Heroku.
+window.__API_BASE__ = 'https://salo-cargo-2f8d2c70243c.herokuapp.com';
