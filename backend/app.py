@@ -6,6 +6,7 @@ import json
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
@@ -28,6 +29,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+FRONTEND_INDEX = BASE_DIR.parent / "index.html"
+FRONTEND_CONFIG = BASE_DIR.parent / "frontend-config.js"
 
 
 def db():
@@ -215,6 +219,16 @@ def health():
     with db() as conn:
         conn.execute("SELECT 1").fetchone()
     return {"ok": True, "service": "salo-cargo-api", "database": str(DB_PATH.name)}
+
+
+@app.get("/", include_in_schema=False)
+def frontend():
+    return FileResponse(FRONTEND_INDEX)
+
+
+@app.get("/frontend-config.js", include_in_schema=False)
+def frontend_config():
+    return FileResponse(FRONTEND_CONFIG, media_type="application/javascript")
 
 
 @app.get("/api/state")
