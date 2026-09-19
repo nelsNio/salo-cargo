@@ -103,6 +103,7 @@ def init_db():
             """
         )
         migrate_state_to_tables(conn)
+        backfill_trip_expenses(conn)
 
 
 def migrate_state_to_tables(conn):
@@ -161,6 +162,54 @@ def migrate_state_to_tables(conn):
             "INSERT OR REPLACE INTO monthly_salaries(year,month,amount) VALUES (?,?,?)",
             (2026, int(month), amount),
         )
+
+
+def backfill_trip_expenses(conn):
+    """Create normalized expense rows from the legacy trip snapshot.
+
+    The first version stored trip costs only as columns inside each trip. This
+    keeps old deployments compatible while exposing those costs through
+    /api/expenses.
+    """
+    row = conn.execute("SELECT payload FROM app_state WHERE id=1").fetchone()
+    if not row:
+        return
+    payload = json.loads(row[0])
+    categories = [
+        ("fuel", "ACPM"),
+        ("tolls", "Peajes"),
+        ("commission", "Comisión"),
+        ("driverPct", "% Conductor"),
+        ("loading", "Cargue / Descargue"),
+        ("policy", "Póliza"),
+        ("parking", "Parqueos"),
+    ]
+    for trip in payload.get("trips", []):
+        trip_id = trip.get("id")
+        if not trip_id or conn.execute("SELECT 1 FROM trips WHERE id=?", (trip_id,)).fetchone() is None:
+            continue
+        if conn.execute("SELECT 1 FROM expenses WHERE trip_id=?", (trip_id,)).fetchone():
+            continue
+        expense_date = trip.get("date", "")
+        for field, category in categories:
+            amount = float(trip.get(field) or 0)
+            if amount > 0:
+                conn.execute(
+                    """INSERT INTO expenses(expense_date,trip_id,category,description,amount,paid_by,status,notes)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                    (expense_date, trip_id, category, category, amount,
+                     trip.get("expensePaidBy", ""), "Registrado", "Migrado desde el detalle del viaje"),
+                )
+        for item in trip.get("otherDetails", []) or []:
+            amount = float(item.get("amount") or 0)
+            description = item.get("description", "Mantenimiento / Otros")
+            if amount > 0:
+                conn.execute(
+                    """INSERT INTO expenses(expense_date,trip_id,category,description,amount,paid_by,status,notes)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                    (expense_date, trip_id, "Mantenimiento / Otros", description, amount,
+                     trip.get("expensePaidBy", ""), "Registrado", "Migrado desde el detalle del viaje"),
+                )
 
 
 class DriverIn(BaseModel):
@@ -256,6 +305,7 @@ def put_state(payload: dict):
         conn.execute("DELETE FROM payments")
         conn.execute("DELETE FROM trips")
         migrate_state_to_tables(conn)
+        backfill_trip_expenses(conn)
     return {"ok": True, "trips": len(payload.get("trips", [])), "payments": len(payload.get("payments", [])), "expenses": len(payload.get("expenses", []))}
 
 
