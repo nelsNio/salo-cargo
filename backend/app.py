@@ -297,6 +297,10 @@ class VehicleIn(BaseModel):
     plate: str | None = None
 
 
+class ActiveUpdate(BaseModel):
+    active: bool
+
+
 class TripIn(BaseModel):
     id: str = Field(min_length=1)
     trip_date: date
@@ -491,6 +495,12 @@ def drivers():
         return [dict(r) for r in conn.execute("SELECT * FROM drivers WHERE active=1 ORDER BY name")]
 
 
+@app.get("/api/drivers/all")
+def all_drivers():
+    with db() as conn:
+        return [dict(r) for r in conn.execute("SELECT * FROM drivers ORDER BY active DESC, name")]
+
+
 @app.post("/api/drivers", status_code=201)
 def create_driver(item: DriverIn):
     try:
@@ -501,17 +511,46 @@ def create_driver(item: DriverIn):
         raise HTTPException(409, "El conductor ya existe")
 
 
+@app.put("/api/drivers/{driver_id}")
+def update_driver(driver_id: int, item: ActiveUpdate):
+    with db() as conn:
+        cur = conn.execute("UPDATE drivers SET active=? WHERE id=?", (1 if item.active else 0, driver_id))
+        if cur.rowcount == 0:
+            raise HTTPException(404, "El conductor no existe")
+        row = conn.execute("SELECT * FROM drivers WHERE id=?", (driver_id,)).fetchone()
+        return dict(row)
+
+
 @app.get("/api/vehicles")
 def vehicles():
     with db() as conn:
         return [dict(r) for r in conn.execute("SELECT * FROM vehicles WHERE active=1 ORDER BY name")]
 
 
+@app.get("/api/vehicles/all")
+def all_vehicles():
+    with db() as conn:
+        return [dict(r) for r in conn.execute("SELECT * FROM vehicles ORDER BY active DESC, name")]
+
+
 @app.post("/api/vehicles", status_code=201)
 def create_vehicle(item: VehicleIn):
+    try:
+        with db() as conn:
+            cur = conn.execute("INSERT INTO vehicles(name, plate) VALUES (?, ?) RETURNING id", (item.name.strip(), item.plate))
+            return {"id": cur.fetchone()["id"], "name": item.name.strip(), "plate": item.plate}
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, "El vehículo o la placa ya existe")
+
+
+@app.put("/api/vehicles/{vehicle_id}")
+def update_vehicle(vehicle_id: int, item: ActiveUpdate):
     with db() as conn:
-        cur = conn.execute("INSERT INTO vehicles(name, plate) VALUES (?, ?) RETURNING id", (item.name.strip(), item.plate))
-        return {"id": cur.fetchone()["id"], "name": item.name.strip(), "plate": item.plate}
+        cur = conn.execute("UPDATE vehicles SET active=? WHERE id=?", (1 if item.active else 0, vehicle_id))
+        if cur.rowcount == 0:
+            raise HTTPException(404, "El vehículo no existe")
+        row = conn.execute("SELECT * FROM vehicles WHERE id=?", (vehicle_id,)).fetchone()
+        return dict(row)
 
 
 @app.get("/api/trips")
