@@ -338,6 +338,11 @@ def frontend():
     return FileResponse(FRONTEND_INDEX)
 
 
+@app.get("/admin/{path:path}", include_in_schema=False)
+def admin_frontend(path: str = ""):
+    return FileResponse(FRONTEND_INDEX)
+
+
 @app.get("/frontend-config.js", include_in_schema=False)
 def frontend_config():
     return FileResponse(FRONTEND_CONFIG, media_type="application/javascript")
