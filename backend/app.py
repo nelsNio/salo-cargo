@@ -3,6 +3,8 @@ from pathlib import Path
 import os
 import sqlite3
 import json
+import base64
+import re
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException
@@ -10,6 +12,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
 try:
     import psycopg
     from psycopg.rows import dict_row
@@ -22,6 +28,8 @@ load_dotenv(BASE_DIR / ".env")
 DB_PATH = Path(os.getenv("DATABASE_PATH", str(BASE_DIR / "viajes.db"))).expanduser()
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 DATABASE_URL = os.getenv("DATABASE_URL", "").replace("postgres://", "postgresql://", 1)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
 
 cors_value = os.getenv(
     "CORS_ORIGINS",
@@ -340,6 +348,11 @@ class InboxUpdate(BaseModel):
     review_notes: str = ""
 
 
+def extract_json(text: str):
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.IGNORECASE)
+    return json.loads(cleaned)
+
+
 @app.on_event("startup")
 def startup():
     init_db()
@@ -432,6 +445,34 @@ def update_inbox_item(item_id: int, item: InboxUpdate):
         if cur.rowcount == 0:
             raise HTTPException(404, "El reporte no existe")
     return {"id": item_id, **item.model_dump()}
+
+
+@app.post("/api/inbox/{item_id}/analyze")
+def analyze_inbox_item(item_id: int):
+    if not OPENAI_API_KEY or OpenAI is None:
+        raise HTTPException(503, "Falta configurar OPENAI_API_KEY en Heroku")
+    with db() as conn:
+        row = conn.execute("SELECT image_data FROM inbox_items WHERE id=?", (item_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "El reporte no existe")
+    image_data = row["image_data"]
+    prompt = """Analiza este reporte manuscrito de transporte. Devuelve SOLO JSON válido, sin markdown, con esta estructura:
+{"trip_date":"YYYY-MM-DD o null","client":"","origin":"","destination":"","freight":0,"advance":0,"expenses":[{"description":"","category":"","amount":0}],"total_expenses":0,"uncertainties":[""],"confidence":"alta|media|baja"}
+Reglas: no inventes valores; usa null o agrega una duda si algo no es legible. Los importes deben ser números en pesos colombianos. Identifica explícitamente diferencias entre la suma de líneas y el total escrito."""
+    try:
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        response = client.responses.create(
+            model=OPENAI_MODEL,
+            input=[{"role": "user", "content": [{"type": "input_text", "text": prompt}, {"type": "input_image", "image_url": image_data}]}],
+        )
+        draft = extract_json(response.output_text)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(502, f"La IA no devolvió JSON válido: {exc}")
+    except Exception as exc:
+        raise HTTPException(502, f"No se pudo analizar el reporte: {exc}")
+    with db() as conn:
+        conn.execute("UPDATE inbox_items SET status=?, draft_json=?, review_notes=? WHERE id=?", ("Pendiente de confirmación", json.dumps(draft, ensure_ascii=False), "Revisar antes de confirmar.", item_id))
+    return {"id": item_id, "status": "Pendiente de confirmación", "draft": draft}
 
 
 @app.get("/api/drivers")
