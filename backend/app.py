@@ -595,6 +595,19 @@ def update_trip(trip_id: str, item: TripIn):
     return item
 
 
+@app.delete("/api/trips/{trip_id}")
+def delete_trip(trip_id: str):
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM trips WHERE id=?", (trip_id,)).fetchone():
+            raise HTTPException(404, "El viaje no existe")
+        # El viaje es el registro padre: elimina primero sus movimientos
+        # asociados para no dejar pagos ni gastos huérfanos.
+        payments_deleted = conn.execute("DELETE FROM payments WHERE trip_id=?", (trip_id,)).rowcount
+        expenses_deleted = conn.execute("DELETE FROM expenses WHERE trip_id=?", (trip_id,)).rowcount
+        conn.execute("DELETE FROM trips WHERE id=?", (trip_id,))
+    return {"deleted": trip_id, "payments_deleted": payments_deleted, "expenses_deleted": expenses_deleted}
+
+
 @app.get("/api/payments")
 def payments():
     with db() as conn:
