@@ -132,4 +132,6 @@ const apiPutCollectionBase=apiPut;apiPut=async(path,payload)=>{if(path.startsWit
 function syncSalaryAmount(){let s=document.getElementById('salaryDriver'),m=+(document.getElementById('salaryMonth')?.value||0),input=document.getElementById('salaryAmount');if(!s||!input)return;let row=driverSalaryState.rows.find(x=>String(x.driver_id)===String(s.value)&&+x.month===m);input.value=row?row.amount:((driverSalaryState.rows.length?0:(driverSalaryState.legacy.find(x=>+x.month===m)?.amount||0)))}
 document.getElementById('salaryDriver')?.addEventListener('change',syncSalaryAmount);document.getElementById('salaryMonth')?.addEventListener('change',syncSalaryAmount);syncSalaryAmount();
 render();
+const liquidatedStyle=document.createElement('style');liquidatedStyle.textContent='.pill.liquidated{background:#e4eef7;color:#174a6e;border:1px solid #b8d0e2}';document.head.appendChild(liquidatedStyle);
+const renderTripsColorBase=renderTrips;renderTrips=()=>{renderTripsColorBase();document.querySelectorAll('#tripRows tr').forEach(row=>{let id=row.querySelector('b')?.textContent.trim(),t=db.trips.find(x=>x.id===id),cell=row.children[9];if(t&&cell&&(t.collection_closed||t.payment_status==='Liquidado'))cell.innerHTML='<span class="pill liquidated">Liquidado</span>'})};renderTrips();
 </script></body></html>

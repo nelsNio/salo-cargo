@@ -237,8 +237,16 @@ def migrate_state_to_tables(conn):
         else:
             name, plate = str(item), None
         if name:
-            conn.execute("INSERT INTO vehicles(name,plate) VALUES (?,?) ON CONFLICT DO NOTHING", (name, plate))
-            existing = conn.execute("SELECT id FROM vehicles WHERE name=?", (name,)).fetchone()
+            existing = conn.execute(
+                "SELECT id FROM vehicles WHERE name=? AND COALESCE(plate,'')=COALESCE(?, '') ORDER BY active DESC, id LIMIT 1",
+                (name, plate),
+            ).fetchone()
+            if not existing:
+                conn.execute("INSERT INTO vehicles(name,plate) VALUES (?,?)", (name, plate))
+                existing = conn.execute(
+                    "SELECT id FROM vehicles WHERE name=? AND COALESCE(plate,'')=COALESCE(?, '') ORDER BY active DESC, id LIMIT 1",
+                    (name, plate),
+                ).fetchone()
             vehicle_cache[name] = existing["id"] if existing else None
     for t in payload.get("trips", []):
         driver_id = driver_cache.get(t.get("driver"))
@@ -572,19 +580,39 @@ def update_driver(driver_id: int, item: ActiveUpdate):
 @app.get("/api/vehicles")
 def vehicles():
     with db() as conn:
-        return [dict(r) for r in conn.execute("SELECT * FROM vehicles WHERE active=1 ORDER BY name")]
+        return [dict(r) for r in conn.execute(
+            """SELECT v.* FROM vehicles v
+               WHERE v.active=1 AND v.id=(
+                 SELECT v2.id FROM vehicles v2
+                 WHERE v2.name=v.name AND COALESCE(v2.plate,'')=COALESCE(v.plate,'')
+                 ORDER BY v2.active DESC, v2.id LIMIT 1
+               ) ORDER BY v.name"""
+        )]
 
 
 @app.get("/api/vehicles/all")
 def all_vehicles():
     with db() as conn:
-        return [dict(r) for r in conn.execute("SELECT * FROM vehicles ORDER BY active DESC, name")]
+        return [dict(r) for r in conn.execute(
+            """SELECT v.* FROM vehicles v
+               WHERE v.id=(
+                 SELECT v2.id FROM vehicles v2
+                 WHERE v2.name=v.name AND COALESCE(v2.plate,'')=COALESCE(v.plate,'')
+                 ORDER BY v2.active DESC, v2.id LIMIT 1
+               ) ORDER BY v.active DESC, v.name"""
+        )]
 
 
 @app.post("/api/vehicles", status_code=201)
 def create_vehicle(item: VehicleIn):
     try:
         with db() as conn:
+            existing = conn.execute(
+                "SELECT 1 FROM vehicles WHERE lower(name)=lower(?) AND COALESCE(plate,'')=COALESCE(?, '') LIMIT 1",
+                (item.name.strip(), item.plate),
+            ).fetchone()
+            if existing:
+                raise HTTPException(409, "El vehículo o la placa ya existe")
             cur = conn.execute("INSERT INTO vehicles(name, plate) VALUES (?, ?) RETURNING id", (item.name.strip(), item.plate))
             return {"id": cur.fetchone()["id"], "name": item.name.strip(), "plate": item.plate}
     except sqlite3.IntegrityError:
